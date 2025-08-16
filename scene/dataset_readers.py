@@ -36,6 +36,7 @@ class CameraInfo(NamedTuple):
     width: int
     height: int
     is_test: bool
+    mask: Image.Image 
 
 class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
@@ -109,10 +110,28 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, depths_params, images_fold
         image_name = extr.name
         depth_path = os.path.join(depths_folder, f"{extr.name[:-n_remove]}.png") if depths_folder != "" else ""
 
+        # >>> START OF NEW CODE <<<
+        mask_folder = os.path.join(os.path.dirname(images_folder), "masks")
+        mask_path = os.path.join(mask_folder, image_name)
+        # print("Loading mask for image:", image_name)
+        # print("Mask path:", mask_path)
+
+        if os.path.exists(mask_path):
+            mask = Image.open(mask_path)
+            np_mask = np.array(mask.convert('L'))
+        else:
+            mask = Image.new('L', (width, height), 255)
+
         cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, depth_params=depth_params,
                               image_path=image_path, image_name=image_name, depth_path=depth_path,
-                              width=width, height=height, is_test=image_name in test_cam_names_list)
+                              width=width, height=height, is_test=image_name in test_cam_names_list,
+                              mask=mask) # <<< Pass the loaded mask here
         cam_infos.append(cam_info)
+
+        # cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, depth_params=depth_params,
+        #                       image_path=image_path, image_name=image_name, depth_path=depth_path,
+        #                       width=width, height=height, is_test=image_name in test_cam_names_list)
+        # cam_infos.append(cam_info)
 
     sys.stdout.write('\n')
     return cam_infos
@@ -197,6 +216,64 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
         depths_folder=os.path.join(path, depths) if depths != "" else "", test_cam_names_list=test_cam_names_list)
     cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
 
+    # >>> START OF NEW FILTERING LOGIC <<<
+    print("Filtering initial point cloud based on masks...")
+
+    # 1. Create a quick lookup map from image name to its mask
+    mask_map = {ci.image_name: ci.mask for ci in cam_infos}
+
+    # 2. Identify all 3D point IDs that fall into a masked region in any image
+    invalid_point3D_ids = set()
+    
+    # 统计信息
+    total_points_checked = 0
+    total_points_invalid = 0
+    
+    for extr in cam_extrinsics.values():
+        if extr.name not in mask_map:
+            continue
+        
+        mask = mask_map[extr.name]
+        mask_pixels = mask.load()
+        mask_width, mask_height = mask.size
+        
+        # 创建更严格的mask检查
+        # 不仅检查点本身，还检查其邻近区域
+        for xy, point3D_id in zip(extr.xys, extr.point3D_ids):
+            if point3D_id == -1:
+                continue
+            
+            total_points_checked += 1
+            x, y = int(xy[0]), int(xy[1])
+
+            # 检查坐标是否在mask的有效范围内
+            if 0 <= x < mask_width and 0 <= y < mask_height:
+                # 检查点本身及其邻近区域
+                is_invalid = False
+                
+                # 检查3x3邻域
+                for dx in [-1, 0, 1]:
+                    for dy in [-1, 0, 1]:
+                        nx, ny = x + dx, y + dy
+                        if 0 <= nx < mask_width and 0 <= ny < mask_height:
+                            if mask_pixels[nx, ny] == 0:  # 黑色区域（人物区域）
+                                is_invalid = True
+                                break
+                    if is_invalid:
+                        break
+                
+                if is_invalid:
+                    invalid_point3D_ids.add(point3D_id)
+                    total_points_invalid += 1
+            else:
+                # 超出边界的点也标记为无效
+                invalid_point3D_ids.add(point3D_id)
+                total_points_invalid += 1
+    
+    print(f"Found {len(invalid_point3D_ids)} 3D points to remove from initial cloud.")
+    print(f"Total points checked: {total_points_checked}, Invalid points: {total_points_invalid}")
+    # >>> END OF NEW FILTERING LOGIC <<<
+
     train_cam_infos = [c for c in cam_infos if train_test_exp or not c.is_test]
     test_cam_infos = [c for c in cam_infos if c.is_test]
 
@@ -208,7 +285,7 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
     if not os.path.exists(ply_path):
         print("Converting point3d.bin to .ply, will happen only the first time you open the scene.")
         try:
-            xyz, rgb, _ = read_points3D_binary(bin_path)
+            xyz, rgb, _ , _ = read_points3D_binary(bin_path)
         except:
             xyz, rgb, _ = read_points3D_text(txt_path)
         storePly(ply_path, xyz, rgb)

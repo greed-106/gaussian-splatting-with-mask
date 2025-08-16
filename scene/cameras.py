@@ -15,10 +15,12 @@ import numpy as np
 from utils.graphics_utils import getWorld2View2, getProjectionMatrix
 from utils.general_utils import PILtoTorch
 import cv2
+from torchvision.transforms import functional as F
 
 class Camera(nn.Module):
     def __init__(self, resolution, colmap_id, R, T, FoVx, FoVy, depth_params, image, invdepthmap,
                  image_name, uid,
+                 mask=None, # <<< 1. Add 'mask=None' to the arguments
                  trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda",
                  train_test_exp = False, is_test_dataset = False, is_test_view = False
                  ):
@@ -31,6 +33,7 @@ class Camera(nn.Module):
         self.FoVx = FoVx
         self.FoVy = FoVy
         self.image_name = image_name
+        
 
         try:
             self.data_device = torch.device(data_device)
@@ -56,6 +59,19 @@ class Camera(nn.Module):
         self.original_image = gt_image.clamp(0.0, 1.0).to(self.data_device)
         self.image_width = self.original_image.shape[2]
         self.image_height = self.original_image.shape[1]
+
+        # ==================== 最新的、最可靠的Mask处理逻辑 ====================
+        if mask is not None:
+            # 使用PIL的resize方法，将mask调整到与渲染图像匹配的分辨率。
+            resized_mask_pil = mask.resize(resolution)
+            self.original_mask = F.to_tensor(resized_mask_pil).to(self.data_device)
+        else:
+            # 如果没有提供mask，默认创建一个全为1的mask（即不进行任何遮挡）
+            self.original_mask = torch.ones((1, self.image_height, self.image_width), device=self.data_device)
+
+        # ... (确保删掉所有其他处理 mask 或 original_mask 的旧代码) ...
+        # ===========================================================================
+        # =====================================================================
 
         self.invdepthmap = None
         self.depth_reliable = False

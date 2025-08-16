@@ -1,4 +1,3 @@
-#
 # Copyright (C) 2023, Inria
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
@@ -329,6 +328,14 @@ class GaussianModel:
         return optimizable_tensors
 
     def _prune_optimizer(self, mask):
+        # ==================== 代码修改处 ====================
+        # 增加一个安全检查。
+        # 如果 self.optimizer 未被初始化 (为 None)，则直接返回，不做任何操作。
+        # 这可以防止在非训练脚本（如我们的 pure.py）中调用此函数时因缺少优化器而崩溃。
+        if self.optimizer is None:
+            return None
+        # =================================================
+
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
             stored_state = self.optimizer.state.get(group['params'][0], None)
@@ -345,23 +352,73 @@ class GaussianModel:
                 group["params"][0] = nn.Parameter(group["params"][0][mask].requires_grad_(True))
                 optimizable_tensors[group["name"]] = group["params"][0]
         return optimizable_tensors
+    def prune_by_mask(self, valid_mask: torch.Tensor):
+        """保留 valid_mask 为 True 的 Gaussians，其余剔除"""
+        # 处理优化器状态（如果存在）
+        optimizable_tensors = self._prune_optimizer(valid_mask)
+        
+        # 如果优化器存在，使用优化器处理后的张量
+        if optimizable_tensors is not None:
+            self._xyz = optimizable_tensors["xyz"]
+            self._features_dc = optimizable_tensors["f_dc"]
+            self._features_rest = optimizable_tensors["f_rest"]
+            self._opacity = optimizable_tensors["opacity"]
+            self._scaling = optimizable_tensors["scaling"]
+            self._rotation = optimizable_tensors["rotation"]
+        else:
+            # 直接处理模型参数
+            self._xyz = self._xyz[valid_mask]
+            self._features_dc = self._features_dc[valid_mask]
+            self._features_rest = self._features_rest[valid_mask]
+            self._opacity = self._opacity[valid_mask]
+            self._scaling = self._scaling[valid_mask]
+            self._rotation = self._rotation[valid_mask]
+        
+        # 处理训练相关张量
+        if hasattr(self, 'xyz_gradient_accum') and self.xyz_gradient_accum.shape[0] > 0:
+            self.xyz_gradient_accum = self.xyz_gradient_accum[valid_mask]
+            self.denom = self.denom[valid_mask]
+        
+        self.max_radii2D = self.max_radii2D[valid_mask]
+        
+        if hasattr(self, "_covariance"):
+            self._covariance = self._covariance[valid_mask]
 
+    
+    
+    # 请用这个新版本替换 gaussian_model.py 中的整个 prune_points 函数
     def prune_points(self, mask):
         valid_points_mask = ~mask
         optimizable_tensors = self._prune_optimizer(valid_points_mask)
 
-        self._xyz = optimizable_tensors["xyz"]
-        self._features_dc = optimizable_tensors["f_dc"]
-        self._features_rest = optimizable_tensors["f_rest"]
-        self._opacity = optimizable_tensors["opacity"]
-        self._scaling = optimizable_tensors["scaling"]
-        self._rotation = optimizable_tensors["rotation"]
+        # 如果 optimizable_tensors 不是 None (即在训练中有优化器时)
+        if optimizable_tensors is not None:
+            self._xyz = optimizable_tensors["xyz"]
+            self._features_dc = optimizable_tensors["f_dc"]
+            self._features_rest = optimizable_tensors["f_rest"]
+            self._opacity = optimizable_tensors["opacity"]
+            self._scaling = optimizable_tensors["scaling"]
+            self._rotation = optimizable_tensors["rotation"]
+        # 如果 optimizable_tensors 是 None (即在 pure.py 中没有优化器时)
+        else:
+            self._xyz = self._xyz[valid_points_mask]
+            self._features_dc = self._features_dc[valid_points_mask]
+            self._features_rest = self._features_rest[valid_points_mask]
+            self._opacity = self._opacity[valid_points_mask]
+            self._scaling = self._scaling[valid_points_mask]
+            self._rotation = self._rotation[valid_points_mask]
 
-        self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
+        # ==================== 最终修改 ====================
+        # 将所有只在训练时使用的、可能导致崩溃的张量都放在这个安全检查里。
+        # 这些张量通常在离线脚本中是空的并且在CPU上。
+        if self.xyz_gradient_accum.shape[0] > 0:
+            self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
+            self.denom = self.denom[valid_points_mask]
+            self.max_radii2D = self.max_radii2D[valid_points_mask] # 将 max_radii2D 也移入此判断
 
-        self.denom = self.denom[valid_points_mask]
-        self.max_radii2D = self.max_radii2D[valid_points_mask]
-        self.tmp_radii = self.tmp_radii[valid_points_mask]
+        if hasattr(self, 'tmp_radii') and self.tmp_radii is not None:
+            self.tmp_radii = self.tmp_radii[valid_points_mask]
+        # ======================================================
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
