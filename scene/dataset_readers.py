@@ -112,7 +112,9 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, depths_params, images_fold
 
         # >>> START OF NEW CODE <<<
         mask_folder = os.path.join(os.path.dirname(images_folder), "masks")
-        mask_path = os.path.join(mask_folder, image_name)
+        # mask_path = os.path.join(mask_folder, image_name)
+        # Change to colmap format
+        mask_path = os.path.join(mask_folder, image_name + ".png")
         # print("Loading mask for image:", image_name)
         # print("Mask path:", mask_path)
 
